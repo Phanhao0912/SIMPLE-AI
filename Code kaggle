@@ -1,0 +1,186 @@
+!pip install ultralytics --quiet
+!pip install gradio --quiet
+
+# Import thư viện
+import os
+import cv2
+import shutil
+import matplotlib.pyplot as plt
+from ultralytics import YOLO
+from ultralytics.utils import SETTINGS
+
+# Thiết lập môi trường
+os.environ['YOLO_CACHE_DIR'] = '/kaggle/working/yolo_cache'
+SETTINGS.update({'runs_dir': '/kaggle/working/ultralytics_logs'})
+
+# Đường dẫn cần thiết
+bowl_crop_dir = "/kaggle/working/bowls_cropped"
+dish_crop_dir = "/kaggle/working/dishes_cropped"
+image_path = "/kaggle/input/foodtestproject/z6582828766338_58b7500b77e640b493268491c92456e0.jpg" -> #Ảnh thử 
+image_name = os.path.splitext(os.path.basename(image_path))[0]
+
+# Xóa dữ liệu cũ
+for path in [bowl_crop_dir, dish_crop_dir]:
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+
+# Load mô hình YOLO
+bowl_model = YOLO(shutil.copy("/kaggle/input/allmodeltrain/yolo11n.pt", "/kaggle/working/yolo11n.pt"))
+dish_model = YOLO(shutil.copy("/kaggle/input/allmodeltrain/model.pt", "/kaggle/working/model.pt"))
+
+# Đọc ảnh khay gốc
+img = cv2.imread(image_path)
+
+# PHẦN 1: Phát hiện & crop các món ăn từ ảnh khay
+
+bowl_results = bowl_model.predict(source=image_path, conf=0.3)
+
+print("🔍 Đã phát hiện các món ăn:")
+for r in bowl_results:
+    for idx, box in enumerate(r.boxes):
+        cls_id = int(box.cls[0])
+        class_name = bowl_model.names[cls_id].lower()
+        conf = float(box.conf[0])
+
+        if "bowl" not in class_name:
+            continue
+
+        # Crop ảnh tô
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        crop = img[y1:y2, x1:x2]
+        crop_name = f"{image_name}_bowl_{idx}_conf{conf:.2f}.jpg"
+        crop_path = os.path.join(bowl_crop_dir, crop_name)
+        cv2.imwrite(crop_path, crop)
+
+        # Hiển thị
+        plt.figure(figsize=(4, 4))
+        plt.imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        plt.title(f" Object #{idx+1} | Conf: {conf:.2f}")
+        plt.axis("off")
+        plt.show()
+
+# PHẦN 2: Phát hiện & crop các món ăn từ ảnh khay
+
+print("\n🍽️ Đang nhận diện món ăn trong từng object...")
+
+for fname in sorted(os.listdir(bowl_crop_dir)):
+    if not fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+        continue
+
+    bowl_path = os.path.join(bowl_crop_dir, fname)
+    bowl_img = cv2.imread(bowl_path)
+    bowl_name = os.path.splitext(fname)[0]
+
+    dish_results = dish_model.predict(source=bowl_path, conf=0.3)
+
+    for r in dish_results:
+        for idx, box in enumerate(r.boxes):
+            cls_id = int(box.cls[0])
+            class_name = dish_model.names[cls_id]
+            conf = float(box.conf[0])
+
+            # Crop ảnh món
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            crop = bowl_img[y1:y2, x1:x2]
+            crop_name = f"{bowl_name}_dish_{class_name}_{idx}_conf{conf:.2f}.jpg"
+            crop_path = os.path.join(dish_crop_dir, crop_name)
+            cv2.imwrite(crop_path, crop)
+
+            # Hiển thị ảnh món
+            plt.figure(figsize=(4, 4))
+            plt.imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            plt.title(f"🍽️ Món: {class_name} | Conf: {conf:.2f}")
+            plt.axis("off")
+            plt.show()
+
+# Import thư viện cần thiết
+import gradio as gr
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
+import numpy as np
+import os
+import json
+from PIL import Image
+
+# Cấu hình TensorFlow không dùng GPU (tránh lỗi CuDNN)
+tf.config.set_visible_devices([], 'GPU')
+
+# Load model CNN và menu giá 
+model_path = "/kaggle/input/allmodeltrain/best_food_model.keras"
+menu_path = "/kaggle/input/menuueh/menu.json"
+dish_dir = "/kaggle/working/dishes_cropped" 
+
+cnn_model = load_model(model_path)
+
+with open(menu_path, "r", encoding="utf-8") as f:
+    menu = json.load(f)
+
+# Danh sách lớp theo thứ tự training
+class_names = list(menu.keys())
+
+# Hàm nhận diện toàn bộ ảnh trong thư mục
+def process_all_dishes(_):
+    results = []
+    total_price = 0
+    dish_images = []
+
+    for fname in sorted(os.listdir(dish_dir)):
+        if not fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+            continue
+
+        # Đọc ảnh và tiền xử lý
+        img_path = os.path.join(dish_dir, fname)
+        img = image.load_img(img_path, target_size=(224, 224))
+        img_array = image.img_to_array(img)
+        img_array = np.expand_dims(img_array, axis=0) / 255.0
+
+        # Dự đoán món ăn
+        pred = cnn_model.predict(img_array, verbose=0)
+        cls_index = np.argmax(pred)
+        cls_name = class_names[cls_index]
+        price = menu.get(cls_name, 0)
+        total_price += price
+
+        # Ghi nhận kết quả
+        results.append((cls_name, price))
+        dish_images.append((Image.open(img_path), f"🍽️ {cls_name} – {price:,} VND"))
+
+    # Tạo hóa đơn
+    receipt = "<b>===== 🧾 HÓA ĐƠN =====</b><br>"
+    for name, price in results:
+        receipt += f"<div style='display:flex; justify-content:space-between;'><span>{name}</span><span>{price:,} VND</span></div><br>"
+    receipt += "<hr>"
+    receipt += f"<b>TỔNG TIỀN PHẢI TRẢ: {total_price:,} VND</b>"
+
+    # Trả về ảnh, label và hóa đơn
+    if dish_images:
+        imgs, labels = zip(*dish_images)
+    else:
+        imgs, labels = [], []
+
+    label_text = "\n".join(labels)
+    return list(imgs), label_text, receipt
+
+# Tùy chỉnh giao diện Gradio
+custom_theme = gr.themes.Soft(
+    primary_hue="emerald",
+    secondary_hue="gray"
+)
+
+demo = gr.Interface(
+    fn=process_all_dishes,
+    inputs=gr.Button("📤 NHẬN DIỆN TẤT CẢ MÓN", elem_classes="btn-primary"),
+    outputs=[
+        gr.Gallery(label="📷 Ảnh các món ăn đã phát hiện", columns=3, height="auto"),
+        gr.Textbox(label="📋 Danh sách món và giá", lines=6),
+        gr.HTML(label="🧾 Hóa đơn tổng kết")
+    ],
+    title="🥗 HỆ THỐNG NHẬN DIỆN MÓN ĂN CĂN TIN",
+    description="🚀 Hệ thống AI tự động phân loại các món ăn đã được cắt từ ảnh khay bằng YOLOv8, sau đó sử dụng mô hình CNN để nhận diện và tính tổng hóa đơn từ file <code>menu.json</code>.",
+    theme=custom_theme,
+    live=False
+)
+
+# Chạy giao diện
+demo.launch(debug=False, share=True)
